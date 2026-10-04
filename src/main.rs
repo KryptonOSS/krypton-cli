@@ -7,16 +7,24 @@ use krypton::prelude::*;
 
 use krypton::Vault;
 
-fn vault_root() -> PathBuf {
+fn vault_root() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("KRYPTON_HOME") {
-        return PathBuf::from(dir).join("vaults");
+        if dir.is_empty() {
+            return Err(Error::Operation("KRYPTON_HOME is set but empty".into()));
+        }
+        return Ok(PathBuf::from(dir).join("vaults"));
     }
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".krypton")
-        .join("vaults")
+    match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        Some(home) if !home.is_empty() => {
+            Ok(PathBuf::from(home).join(".krypton").join("vaults"))
+        }
+        Some(_) => Err(Error::Operation(
+            "HOME is set but empty; unset it or set KRYPTON_HOME".into(),
+        )),
+        None => Err(Error::Operation(
+            "cannot determine home directory; set HOME or KRYPTON_HOME".into(),
+        )),
+    }
 }
 
 fn vault_path(name: &str) -> Result<PathBuf> {
@@ -25,7 +33,46 @@ fn vault_path(name: &str) -> Result<PathBuf> {
             "invalid vault name {name:?}: use a plain name, not a path"
         )));
     }
-    Ok(vault_root().join(name))
+    let path = vault_root()?.join(name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(Error::Operation(format!(
+                "refusing to use vault {}: it is a symlink",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(Error::Operation(format!(
+                "cannot access vault {}: {e}",
+                path.display()
+            )));
+        }
+    }
+    Ok(path)
+}
+
+fn new_vault_path(name: &str) -> Result<PathBuf> {
+    let path = vault_path(name)?;
+    if path.exists() {
+        return Err(Error::Operation(format!(
+            "vault {name:?} already exists at {}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+fn existing_vault_path(name: &str) -> Result<PathBuf> {
+    let path = vault_path(name)?;
+    if !path.is_dir() {
+        return Err(Error::Operation(format!(
+            "no vault named {name:?} at {} (create it with `krypton init {name}`)",
+            path.display()
+        )));
+    }
+    Ok(path)
 }
 
 #[derive(Parser)]
@@ -168,7 +215,7 @@ fn main() {
 fn run(command: Commands) -> Result<()> {
     match command {
         Commands::Init { vault } => {
-            let path = vault_path(&vault)?;
+            let path = new_vault_path(&vault)?;
             let password = prompt_password("Enter vault password")?;
             let confirm = prompt_password("Confirm password")?;
             if password != confirm {
@@ -178,22 +225,25 @@ fn run(command: Commands) -> Result<()> {
             println!("Vault '{}' created at {}", vault, path.display());
         }
         Commands::Add { vault, path, name } => {
+            let dir = existing_vault_path(&vault)?;
             let password = prompt_password("Enter vault password")?;
-            let mut v = Vault::new(vault_path(&vault)?);
+            let mut v = Vault::new(dir);
             v.unlock(&password)?;
             v.add(&path, name.as_deref())?;
             println!("Added successfully!");
         }
         Commands::Remove { vault, name } => {
+            let dir = existing_vault_path(&vault)?;
             let password = prompt_password("Enter vault password")?;
-            let mut v = Vault::new(vault_path(&vault)?);
+            let mut v = Vault::new(dir);
             v.unlock(&password)?;
             v.remove(&name)?;
             println!("Removed successfully!");
         }
         Commands::List { vault } => {
+            let dir = existing_vault_path(&vault)?;
             let password = prompt_password("Enter vault password")?;
-            let mut v = Vault::new(vault_path(&vault)?);
+            let mut v = Vault::new(dir);
             v.unlock(&password)?;
             let files = v.list()?;
             if files.is_empty() {
@@ -213,25 +263,28 @@ fn run(command: Commands) -> Result<()> {
             }
         }
         Commands::Extract { vault, name, dest } => {
+            let dir = existing_vault_path(&vault)?;
             let password = prompt_password("Enter vault password")?;
-            let mut v = Vault::new(vault_path(&vault)?);
+            let mut v = Vault::new(dir);
             v.unlock(&password)?;
             let out = v.extract(&name, &dest)?;
             println!("Extracted to: {}", out.display());
         }
         Commands::ChangePassword { vault } => {
+            let dir = existing_vault_path(&vault)?;
             let old = prompt_password("Current password")?;
             let new = prompt_password("New password")?;
             let confirm = prompt_password("Confirm new password")?;
             if new != confirm {
                 return Err(Error::Operation("new passwords don't match".into()));
             }
-            Vault::new(vault_path(&vault)?).change_password(&old, &new)?;
+            Vault::new(dir).change_password(&old, &new)?;
             println!("Password changed successfully!");
         }
         Commands::Verify { vault } => {
+            let dir = existing_vault_path(&vault)?;
             let password = prompt_password("Enter vault password")?;
-            let report = Vault::new(vault_path(&vault)?).verify(&password)?;
+            let report = Vault::new(dir).verify(&password)?;
             let ok = report.missing.is_empty() && report.corrupted.is_empty();
             print_report(&report);
             if !ok {
