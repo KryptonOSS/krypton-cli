@@ -7,6 +7,27 @@ use krypton::prelude::*;
 
 use krypton::Vault;
 
+fn vault_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os("KRYPTON_HOME") {
+        return PathBuf::from(dir).join("vaults");
+    }
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".krypton")
+        .join("vaults")
+}
+
+fn vault_path(name: &str) -> Result<PathBuf> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(Error::Operation(format!(
+            "invalid vault name {name:?}: use a plain name, not a path"
+        )));
+    }
+    Ok(vault_root().join(name))
+}
+
 #[derive(Parser)]
 #[command(name = "krypton")]
 #[command(version = krypton::VERSION)]
@@ -20,13 +41,13 @@ struct Cli {
 enum Commands {
     /// Initialize a new vault.
     Init {
-        /// Path to the vault directory.
-        vault: PathBuf,
+        /// Vault name (stored in ~/.krypton/vaults/<name>).
+        vault: String,
     },
     /// Add a file or folder to the vault.
     Add {
-        /// Path to the vault directory.
-        vault: PathBuf,
+        /// Vault name (stored in ~/.krypton/vaults/<name>).
+        vault: String,
         /// Path to the file or folder to add.
         path: PathBuf,
         /// Custom name in vault.
@@ -35,20 +56,20 @@ enum Commands {
     },
     /// Remove a file or folder from the vault.
     Remove {
-        /// Path to the vault directory.
-        vault: PathBuf,
+        /// Vault name (stored in ~/.krypton/vaults/<name>).
+        vault: String,
         /// Name of the file/folder in vault.
         name: String,
     },
     /// List vault contents.
     List {
-        /// Path to the vault directory.
-        vault: PathBuf,
+        /// Vault name (stored in ~/.krypton/vaults/<name>).
+        vault: String,
     },
     /// Extract/decrypt a file from the vault.
     Extract {
-        /// Path to the vault directory.
-        vault: PathBuf,
+        /// Vault name (stored in ~/.krypton/vaults/<name>).
+        vault: String,
         /// Name of the file in vault.
         name: String,
         /// Destination path.
@@ -56,13 +77,13 @@ enum Commands {
     },
     /// Change the vault password.
     ChangePassword {
-        /// Path to the vault directory.
-        vault: PathBuf,
+        /// Vault name (stored in ~/.krypton/vaults/<name>).
+        vault: String,
     },
     /// Verify the integrity of all vault entries (full authentication).
     Verify {
-        /// Path to the vault directory.
-        vault: PathBuf,
+        /// Vault name (stored in ~/.krypton/vaults/<name>).
+        vault: String,
     },
     /// Encrypt a single file.
     Encrypt {
@@ -147,31 +168,32 @@ fn main() {
 fn run(command: Commands) -> Result<()> {
     match command {
         Commands::Init { vault } => {
+            let path = vault_path(&vault)?;
             let password = prompt_password("Enter vault password")?;
             let confirm = prompt_password("Confirm password")?;
             if password != confirm {
                 return Err(Error::Operation("passwords don't match".into()));
             }
-            Vault::new(vault).init(&password)?;
-            println!("Vault created successfully!");
+            Vault::new(path.clone()).init(&password)?;
+            println!("Vault '{}' created at {}", vault, path.display());
         }
         Commands::Add { vault, path, name } => {
             let password = prompt_password("Enter vault password")?;
-            let mut v = Vault::new(vault);
+            let mut v = Vault::new(vault_path(&vault)?);
             v.unlock(&password)?;
             v.add(&path, name.as_deref())?;
             println!("Added successfully!");
         }
         Commands::Remove { vault, name } => {
             let password = prompt_password("Enter vault password")?;
-            let mut v = Vault::new(vault);
+            let mut v = Vault::new(vault_path(&vault)?);
             v.unlock(&password)?;
             v.remove(&name)?;
             println!("Removed successfully!");
         }
         Commands::List { vault } => {
             let password = prompt_password("Enter vault password")?;
-            let mut v = Vault::new(vault);
+            let mut v = Vault::new(vault_path(&vault)?);
             v.unlock(&password)?;
             let files = v.list()?;
             if files.is_empty() {
@@ -192,7 +214,7 @@ fn run(command: Commands) -> Result<()> {
         }
         Commands::Extract { vault, name, dest } => {
             let password = prompt_password("Enter vault password")?;
-            let mut v = Vault::new(vault);
+            let mut v = Vault::new(vault_path(&vault)?);
             v.unlock(&password)?;
             let out = v.extract(&name, &dest)?;
             println!("Extracted to: {}", out.display());
@@ -204,12 +226,12 @@ fn run(command: Commands) -> Result<()> {
             if new != confirm {
                 return Err(Error::Operation("new passwords don't match".into()));
             }
-            Vault::new(vault).change_password(&old, &new)?;
+            Vault::new(vault_path(&vault)?).change_password(&old, &new)?;
             println!("Password changed successfully!");
         }
         Commands::Verify { vault } => {
             let password = prompt_password("Enter vault password")?;
-            let report = Vault::new(vault).verify(&password)?;
+            let report = Vault::new(vault_path(&vault)?).verify(&password)?;
             let ok = report.missing.is_empty() && report.corrupted.is_empty();
             print_report(&report);
             if !ok {
